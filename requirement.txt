@@ -1,0 +1,6 @@
+discord.py
+yt-dlp
+youtube-search
+python-dotenv
+Flask==3.0.0
+discordoauth2

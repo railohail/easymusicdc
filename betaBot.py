@@ -1,6 +1,6 @@
 import asyncio
 import discord
-from discord.ext import commands, tasks
+from discord.ext import commands
 import yt_dlp
 from async_timeout import timeout
 from functools import partial
@@ -8,13 +8,9 @@ from youtube_search import YoutubeSearch
 import os
 from dotenv import load_dotenv
 import concurrent.futures
-import json
-import aiohttp
-from datetime import datetime, time, timezone
-# Load environment variables use python 3.10 please 
+
 load_dotenv()
 
-# Use yt_dlp instead of youtube_dl
 ydl_opts = {
     'format': 'bestaudio/best',
     'postprocessors': [{
@@ -36,13 +32,21 @@ ydl_opts = {
 
 ffmpeg_options = {
     'options': '-vn',
-    'executable': r'C:\ffmpeg\bin\ffmpeg.exe'  # Adjust this path to where you installed ffmpeg
+    'executable': r'C:\ffmpeg\bin\ffmpeg.exe'
 }
 
 ytdl = yt_dlp.YoutubeDL(ydl_opts)
 
-# Create a ThreadPoolExecutor
 thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+
+class AudioEffect:
+    def __init__(self, filter_name, params=None):
+        self.filter_name = filter_name
+        self.params = params or {}
+
+    def __str__(self):
+        params_str = ':'.join(f'{k}={v}' for k, v in self.params.items())
+        return f"{self.filter_name}={params_str}" if params_str else self.filter_name
 
 class YTDLSource(discord.PCMVolumeTransformer):
     def __init__(self, source, *, data, volume=0.5):
@@ -50,6 +54,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
         self.data = data
         self.title = data.get('title')
         self.url = data.get('url')
+        self.effects = []
 
     @classmethod
     async def create(cls, url, *, loop=None, stream=False):
@@ -60,7 +65,20 @@ class YTDLSource(discord.PCMVolumeTransformer):
         if 'entries' in data:
             data = data['entries'][0]
         
-        return cls(discord.FFmpegPCMAudio(data['url'], **ffmpeg_options), data=data)
+        return cls(await cls.create_source(data['url'], data), data=data)
+
+    @staticmethod
+    async def create_source(url, data, effects=None):
+        ffmpeg_options = {
+            'options': '-vn',
+            'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5'
+        }
+        if effects:
+            ffmpeg_options['options'] += f" -af {','.join(str(e) for e in effects)}"
+        return discord.FFmpegPCMAudio(url, **ffmpeg_options)
+
+    async def recreate_source(self):
+        return await self.create_source(self.url, self.data, self.effects)
 
 class Song:
     def __init__(self, url, title=None):
@@ -156,7 +174,6 @@ class Music(commands.Cog):
 
     @commands.command()
     async def search(self, ctx, *, query: str):
-        # Cancel any existing search task for this user
         if ctx.author.id in self.search_tasks:
             self.search_tasks[ctx.author.id].cancel()
 
@@ -176,7 +193,6 @@ class Music(commands.Cog):
                 return m.author == ctx.author and m.channel == ctx.channel and m.content.isdigit() and 1 <= int(m.content) <= 5
 
             try:
-                # Create a task for waiting for the response
                 wait_task = asyncio.create_task(self.bot.wait_for('message', check=check, timeout=60.0))
                 self.search_tasks[ctx.author.id] = wait_task
                 response = await wait_task
@@ -193,12 +209,12 @@ class Music(commands.Cog):
                 await message.delete()
                 await ctx.send('Last search cancelled due to a new search request.')
             finally:
-                # Remove the task from the dictionary
                 self.search_tasks.pop(ctx.author.id, None)
 
         except Exception as e:
             await ctx.send(f'An error occurred: {str(e)}')
             print(f"Search error details: {e}")
+
     @commands.command()
     async def play(self, ctx, *, search: str):
         await ctx.send(f'Processing your request for: {search}')
@@ -222,7 +238,6 @@ class Music(commands.Cog):
                 search = f"https://youtube.com{results[0]['url_suffix']}"
                 song_title = results[0]['title']
             
-            # If we didn't get a title from the search, we'll get it when the song is actually played
             song = Song(search, title=song_title)
             await player.queue.put(song)
             await ctx.send(f'Song Added to queue')
@@ -304,7 +319,6 @@ class Music(commands.Cog):
         if number < 1 or number > player.queue.qsize():
             return await ctx.send(f'Please provide a valid number between 1 and {player.queue.qsize()}.')
         
-        # Convert queue to a list, remove the item, and recreate the queue
         queue_list = list(player.queue._queue)
         removed_song = queue_list.pop(number - 1)
         player.queue._queue = asyncio.Queue()
@@ -332,30 +346,76 @@ class Music(commands.Cog):
                 await ctx.send("Please use a value between 0 and 100")
         else:
             await ctx.send("Not connected to a voice channel.")
+
     @commands.command()
     async def clear_queue(self, ctx):
         player = self.get_player(ctx)
         if player.queue.empty():
             await ctx.send("The queue is already empty.")
         else:
-            # Clear the queue
             player.queue._queue.clear()
             await ctx.send("The queue has been cleared.")
+
     @commands.command()
     async def stop(self, ctx):
         vc = ctx.voice_client
         if vc:
             player = self.get_player(ctx)
-            # Clear the queue
             player.queue._queue.clear()
-            # Stop the current song and disconnect
             await self.cleanup(ctx.guild)
             await ctx.send("Stopped, cleared the queue, and disconnected.")
         else:
             await ctx.send("Not connected to a voice channel.")
 
+    @commands.command()
+    async def bass_boost(self, ctx, level: int = 5):
+        if not 1 <= level <= 10:
+            return await ctx.send('Bass boost level must be between 1 and 10.')
+        effect = AudioEffect('bass', {'g': level})
+        await self._apply_effect(ctx, effect)
 
+    @commands.command()
+    async def speed(self, ctx, value: float):
+        if not 0.5 <= value <= 2:
+            return await ctx.send('Speed must be between 0.5 and 2.')
+        effect = AudioEffect('atempo', {'tempo': value})
+        await self._apply_effect(ctx, effect)
 
+    @commands.command()
+    async def pitch(self, ctx, value: float):
+        if not 0.5 <= value <= 2:
+            return await ctx.send('Pitch must be between 0.5 and 2.')
+        effect = AudioEffect('rubberband', {'pitch': value})
+        await self._apply_effect(ctx, effect)
+
+    @commands.command()
+    async def reset_effects(self, ctx):
+        vc = ctx.voice_client
+        if not vc or not vc.is_playing():
+            return await ctx.send('Nothing is currently playing.')
+        
+        source = vc.source
+        if isinstance(source, YTDLSource):
+            source.effects.clear()
+            new_source = await source.recreate_source()
+            vc.source = new_source
+            await ctx.send('Reset all audio effects.')
+        else:
+            await ctx.send('Cannot reset effects for this audio source.')
+
+    async def _apply_effect(self, ctx, effect):
+        vc = ctx.voice_client
+        if not vc or not vc.is_playing():
+            return await ctx.send('Nothing is currently playing.')
+        
+        source = vc.source
+        if isinstance(source, YTDLSource):
+            source.effects.append(effect)
+            new_source = await source.recreate_source()
+            vc.source = new_source
+            await ctx.send(f'Applied {effect.filter_name} effect.')
+        else:
+            await ctx.send('Cannot apply effects to this audio source.')
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -368,7 +428,6 @@ async def on_ready():
     print('------')
     await bot.add_cog(Music(bot))
 
-# Load the token from the environment variable
 TOKEN = os.getenv('DISCORD_BOT_TOKEN')
 if not TOKEN:
     raise ValueError("No token found. Please set the DISCORD_BOT_TOKEN environment variable.")

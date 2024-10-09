@@ -1,0 +1,101 @@
+#wordle
+# Game state
+current_word = ''
+guesses = {}
+leaderboard = {}
+last_reset_date = None
+
+def load_leaderboard():
+    global leaderboard
+    try:
+        with open('leaderboard.json', 'r') as f:
+            leaderboard = json.load(f)
+    except FileNotFoundError:
+        leaderboard = {}
+
+def save_leaderboard():
+    with open('leaderboard.json', 'w') as f:
+        json.dump(leaderboard, f)
+
+async def get_random_word():
+    async with aiohttp.ClientSession() as session:
+        async with session.get('https://random-word-api.herokuapp.com/word?length=5') as response:
+            if response.status == 200:
+                word_list = await response.json()
+                return word_list[0]
+            else:
+                print("Failed to fetch word from API. Using default word.")
+                return "default"
+
+async def choose_word():
+    global current_word, last_reset_date, guesses
+    current_word = await get_random_word()
+    last_reset_date = datetime.now(timezone.utc).date()
+    guesses = {}
+    print(f"New word chosen: {current_word}")
+
+def check_guess(guess):
+    result = []
+    for i, letter in enumerate(guess):
+        if letter == current_word[i]:
+            result.append('🟩')  # Correct letter, correct position
+        elif letter in current_word:
+            result.append('🟨')  # Correct letter, wrong position
+        else:
+            result.append('⬜')  # Wrong letter
+    return ''.join(result)
+
+@bot.event
+async def on_ready():
+    print(f'{bot.user} has connected to Discord!')
+    load_leaderboard()
+    await choose_word()
+    daily_reset.start()
+
+@tasks.loop(time=time(hour=0, minute=0, tzinfo=timezone.utc))
+async def daily_reset():
+    await choose_word()
+
+@bot.command(name='guess')
+async def guess(ctx, word: str):
+    if len(word) != 5:
+        await ctx.send("Please guess a 5-letter word.")
+        return
+
+    user_id = str(ctx.author.id)
+    if user_id not in guesses:
+        guesses[user_id] = []
+
+    if len(guesses[user_id]) >= 6:
+        await ctx.send("You've used all your guesses for today!")
+        return
+
+    result = check_guess(word.lower())
+    guesses[user_id].append(result)
+    
+    await ctx.send(f"Guess {len(guesses[user_id])}/6:\n{result}")
+
+    if result == '🟩🟩🟩🟩🟩':
+        await ctx.send(f"Congratulations! You've guessed the word in {len(guesses[user_id])} attempts!")
+        if user_id not in leaderboard:
+            leaderboard[user_id] = {'wins': 0, 'best_score': 6}
+        leaderboard[user_id]['wins'] += 1
+        leaderboard[user_id]['best_score'] = min(leaderboard[user_id]['best_score'], len(guesses[user_id]))
+        save_leaderboard()
+    elif len(guesses[user_id]) == 6:
+        spoiler_word = f"||{current_word}||"
+        await ctx.send(f"Game over! The word was {spoiler_word}.")
+
+@bot.command(name='leaderboard')
+async def show_leaderboard(ctx):
+    sorted_leaderboard = sorted(leaderboard.items(), key=lambda x: (x[1]['wins'], -x[1]['best_score']), reverse=True)
+    leaderboard_text = "Leaderboard:\n"
+    for i, (user_id, stats) in enumerate(sorted_leaderboard[:10], 1):
+        user = await bot.fetch_user(int(user_id))
+        leaderboard_text += f"{i}. {user.name}: {stats['wins']} wins, Best: {stats['best_score']} guesses\n"
+    await ctx.send(leaderboard_text)
+
+@bot.command(name='reveal')
+async def reveal_word(ctx):
+    spoiler_word = f"||{current_word}||"
+    await ctx.send(f"Today's word is: {spoiler_word}")

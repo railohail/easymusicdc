@@ -2,5 +2,6 @@ discord.py
 yt-dlp
 youtube-search
 python-dotenv
-Flask==3.0.0
+Flask
 discordoauth2
+pydub

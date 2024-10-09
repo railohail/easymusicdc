@@ -285,10 +285,31 @@ class Music(commands.Cog):
         if player.queue.empty():
             return await ctx.send('There are currently no more queued songs.')
 
-        upcoming = list(player.queue._queue)[:5]  # Get the next 5 songs
-        fmt = '\n'.join(f'**`{song.title}`**' for song in upcoming)
+        upcoming = list(player.queue._queue)
+        fmt = '\n'.join(f'`{i+1}.` **{song.title}**' for i, song in enumerate(upcoming))
         embed = discord.Embed(title=f'Upcoming - Next {len(upcoming)}', description=fmt)
         await ctx.send(embed=embed)
+
+    @commands.command()
+    async def delete(self, ctx, number: int = None):
+        if number is None:
+            return await ctx.send('Please provide a number to delete a song from the queue. Usage: `!delete <number>`')
+
+        player = self.get_player(ctx)
+        if player.queue.empty():
+            return await ctx.send('The queue is empty.')
+        
+        if number < 1 or number > player.queue.qsize():
+            return await ctx.send(f'Please provide a valid number between 1 and {player.queue.qsize()}.')
+        
+        # Convert queue to a list, remove the item, and recreate the queue
+        queue_list = list(player.queue._queue)
+        removed_song = queue_list.pop(number - 1)
+        player.queue._queue = asyncio.Queue()
+        for song in queue_list:
+            await player.queue.put(song)
+        
+        await ctx.send(f'Removed song: **{removed_song.title}**')
 
     @commands.command()
     async def now_playing(self, ctx):

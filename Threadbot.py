@@ -11,6 +11,9 @@ import concurrent.futures
 import json
 import aiohttp
 from datetime import datetime, time, timezone
+import asyncio
+import logging
+
 # Load environment variables use python 3.10 please 
 load_dotenv()
 
@@ -95,6 +98,12 @@ class MusicPlayer:
             except asyncio.TimeoutError:
                 return self.destroy(self._guild)
 
+            if not self._guild.voice_client:
+                await self.ensure_voice_connected()
+                if not self._guild.voice_client:
+                    await self._channel.send("Failed to connect to voice channel. Skipping song.")
+                    continue
+
             try:
                 source = await YTDLSource.create(song.url, loop=self.bot.loop, stream=True)
             except Exception as e:
@@ -105,17 +114,27 @@ class MusicPlayer:
             source.volume = self.volume
             self.current = source
 
-            self._guild.voice_client.play(source, after=lambda _: self.bot.loop.call_soon_threadsafe(self.next.set))
-            self.np = await self._channel.send(f'**Now Playing:** `{source.title}`')
-            await self.next.wait()
-
-            source.cleanup()
-            self.current = None
-
             try:
-                await self.np.delete()
-            except discord.HTTPException:
-                pass
+                self._guild.voice_client.play(source, after=lambda e: self.bot.loop.call_soon_threadsafe(self.play_next_song, e))
+                self.np = await self._channel.send(f'**Now Playing:** `{source.title}`')
+                await self.next.wait()
+            except Exception as e:
+                logging.error(f"Error during playback: {e}")
+                await self._channel.send(f"An error occurred during playback. Attempting to continue.")
+                self.play_next_song(error=e)
+
+    def play_next_song(self, error=None):
+        if error:
+            logging.error(f"Error in playback: {error}")
+        self.next.set()
+
+    async def ensure_voice_connected(self):
+        if not self._guild.voice_client:
+            try:
+                await self._channel.send("Reconnecting to voice channel...")
+                await asyncio.wait_for(self._cog.join(self._channel), timeout=30.0)
+            except asyncio.TimeoutError:
+                await self._channel.send("Failed to reconnect to voice channel.")
 
     def destroy(self, guild):
         return self.bot.loop.create_task(self._cog.cleanup(guild))
@@ -150,9 +169,22 @@ class Music(commands.Cog):
     async def join(self, ctx):
         if ctx.author.voice:
             channel = ctx.author.voice.channel
-            await channel.connect()
+            try:
+                await channel.connect()
+            except Exception as e:
+                logging.error(f"Error joining voice channel: {e}")
+                await ctx.send(f"An error occurred while joining the voice channel: {e}")
         else:
             await ctx.send("You are not connected to a voice channel.")
+
+    @commands.Cog.listener()
+    async def on_voice_state_update(self, member, before, after):
+        if member == self.bot.user and after.channel is None:
+            # Bot was disconnected from voice channel
+            for player in self.players.values():
+                if player._guild == member.guild:
+                    await player.ensure_voice_connected()
+                    break
 
     @commands.command()
     async def search(self, ctx, *, query: str):
@@ -356,6 +388,8 @@ class Music(commands.Cog):
 
 
 
+# Setup logging
+logging.basicConfig(level=logging.ERROR, format='%(asctime)s - %(levelname)s - %(message)s')
 
 intents = discord.Intents.default()
 intents.message_content = True

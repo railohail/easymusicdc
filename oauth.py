@@ -1,6 +1,8 @@
 import discordoauth2
+import os 
 from flask import Flask, request, redirect
-
+from dotenv import load_dotenv
+load_dotenv()
 client = discordoauth2.Client(
     int(os.getenv('DISCORD_CLIENT_ID')),
     secret=os.getenv('DISCORD_CLIENT_SECRET'),

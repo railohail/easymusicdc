@@ -13,7 +13,9 @@ import json
 import aiohttp
 from datetime import datetime, time, timezone
 import logging
-
+import aiohttp
+from bs4 import BeautifulSoup
+import random
 # Load environment variables
 load_dotenv()
 
